@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""make_icon.py — render NeedleMac.icns: a rounded-square gradient tile with
-a steel needle (eye + point) and a cyan thread loop. Needs Pillow.
+"""make_icon.py — render NeedleMac.icns: a quill pen over a papyrus scroll
+on a warm parchment-gradient tile. Needs Pillow.
 
-    python3 make_icon.py            # -> icon.iconset + NeedleMac.icns
+    python3 make_icon.py            # -> icon.png + icon.iconset + NeedleMac.icns
 """
 import math
 import os
@@ -29,54 +29,97 @@ def lerp3(a, b, t):
 def main():
     out_dir = os.path.dirname(os.path.abspath(__file__))
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
 
-    # --- rounded square with a vertical indigo -> violet gradient ---------
-    # draw the gradient clipped to a rounded-rect mask
+    # --- rounded square, warm parchment gradient (sand -> terracotta) -----
+    m, rad = sc(72), sc(196)
     mask = Image.new("L", (S, S), 0)
-    md = ImageDraw.Draw(mask)
-    m = sc(72)                      # margin
-    rad = sc(196)
-    md.rounded_rectangle([m, m, S - m, S - m], radius=rad, fill=255)
-
+    ImageDraw.Draw(mask).rounded_rectangle([m, m, S - m, S - m], radius=rad, fill=255)
     grad = Image.new("RGBA", (S, S))
     gd = ImageDraw.Draw(grad)
-    top, bot = (58, 60, 140), (124, 58, 190)
+    top, bot = (245, 222, 179), (226, 168, 122)      # parchment -> warm clay
     for y in range(S):
         gd.line([(0, y), (S, y)], fill=lerp3(top, bot, y / S) + (255,))
     img.paste(grad, (0, 0), mask)
 
-    # --- thread: one clean cyan ring passing behind the needle ------------
-    tcx, tcy, tr = sc(500), sc(620), sc(170)
-    d.ellipse([tcx - tr, tcy - tr, tcx + tr, tcy + tr],
-              outline=(80, 200, 255, 255), width=sc(30))
+    # --- papyrus scroll: a sheet with rolled ends, slightly tilted --------
+    sheet = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(sheet)
+    cx, cy = sc(490), sc(560)
+    w, h = sc(340), sc(400)
+    ang = math.radians(8)
+    paper = (243, 229, 198, 255)
+    edge = (198, 168, 122, 255)
 
-    # --- needle: capsule body + triangular point, steel white -------------
-    x1, y1, x2, y2 = sc(300), sc(730), sc(700), sc(330)   # eye end -> tip base
-    tipx, tipy = sc(760), sc(270)                          # the point
-    half = sc(44)
-    # body as a thick line with round ends
-    d.line([x1, y1, x2, y2], fill=(240, 244, 250, 255), width=half * 2)
-    # tip triangle
-    ang = math.atan2(tipy - y2, tipx - x2)
-    perp = ang + math.pi / 2
-    bx1 = x2 + half * math.cos(perp)
-    by1 = y2 + half * math.sin(perp)
-    bx2 = x2 - half * math.cos(perp)
-    by2 = y2 - half * math.sin(perp)
-    d.polygon([(bx1, by1), (bx2, by2), (tipx, tipy)], fill=(240, 244, 250, 255))
-    # subtle shading: a thin darker seam along the shaft, centered
-    d.line([x1, y1, x2, y2], fill=(205, 212, 228, 255), width=sc(8))
+    def rot(dx, dy):
+        return (cx + dx * math.cos(ang) - dy * math.sin(ang),
+                cy + dx * math.sin(ang) + dy * math.cos(ang))
 
-    # --- the eye: a hole through the needle near the top end --------------
-    ecx, ecy, er = sc(655), sc(375), sc(52)
-    # punch: repaint the gradient inside the eye circle
-    eye_mask = Image.new("L", (S, S), 0)
-    ImageDraw.Draw(eye_mask).ellipse([ecx - er, ecy - er, ecx + er, ecy + er], fill=255)
-    img.paste(grad, (0, 0), eye_mask)
-    # dark rim around the eye
-    d.ellipse([ecx - er, ecy - er, ecx + er, ecy + er],
-              outline=(40, 44, 70, 255), width=sc(14))
+    corners = [rot(-w / 2, -h / 2), rot(w / 2, -h / 2),
+               rot(w / 2, h / 2), rot(-w / 2, h / 2)]
+    sd.polygon(corners, fill=paper, outline=edge, width=sc(6))
+
+    # rolled top and bottom: cylinders along the tilted horizontal axis
+    def roll(dy):
+        p1 = rot(-w / 2 - sc(16), dy)
+        p2 = rot(w / 2 + sc(16), dy)
+        sd.line([p1, p2], fill=edge, width=sc(104))
+        sd.line([p1, p2], fill=(236, 220, 186, 255), width=sc(88))
+        for p in (p1, p2):
+            r = sc(52)
+            sd.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r],
+                       fill=(233, 216, 182, 255), outline=edge, width=sc(6))
+    roll(-h / 2)
+    roll(h / 2)
+
+    # faint writing lines on the sheet: one aligned block
+    for i in range(6):
+        t = -h / 2 + sc(60) + i * sc(56)
+        x1, y1 = rot(-w / 2 + sc(34), t)
+        ln = w - sc(68)
+        x2 = x1 + ln * math.cos(ang)
+        y2 = y1 + ln * math.sin(ang)
+        sd.line([x1, y1, x2, y2], fill=(140, 108, 78, 200), width=sc(9))
+    img.alpha_composite(sheet)
+
+    # --- quill: shaft lower-left -> feather upper-right -------------------
+    q = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    qd = ImageDraw.Draw(q)
+    x1, y1 = sc(290), sc(770)          # nib end
+    x2, y2 = sc(770), sc(240)          # feather tip
+    ang_q = math.atan2(y2 - y1, x2 - x1)
+    perp = ang_q + math.pi / 2
+    L = math.hypot(x2 - x1, y2 - y1)
+
+    def off(along, side, bulge):
+        return (x1 + along * math.cos(ang_q) + side * bulge * math.cos(perp),
+                y1 + along * math.sin(ang_q) + side * bulge * math.sin(perp))
+
+    # feather body: a leaf shape along the upper ~70% of the shaft
+    start = L * 0.28
+    steps = 24
+    pts = []
+    for i in range(steps + 1):
+        t = start + (L - start) * (i / steps)
+        bulge = math.sin(math.pi * i / steps) * L * 0.15
+        pts.append(off(t, 1, bulge))
+    for i in range(steps, -1, -1):
+        t = start + (L - start) * (i / steps)
+        bulge = math.sin(math.pi * i / steps) * L * 0.09
+        pts.append(off(t, -1, bulge))
+    qd.polygon(pts, fill=(252, 248, 240, 255), outline=(140, 112, 80, 255))
+    # shaft (rachis): one stroke from nib to feather tip, no doubled line
+    qd.line([(x1, y1), (x2, y2)], fill=(110, 76, 52, 255), width=sc(14))
+    for i in range(3, steps, 2):
+        t = start + (L - start) * (i / steps)
+        bulge = math.sin(math.pi * i / steps) * L * 0.15
+        qd.line([off(t, 0, 0), off(t, 1, bulge * 0.9)],
+                fill=(224, 210, 186, 255), width=sc(4))
+    # nib: dark triangle with a slit
+    tipx, tipy = off(-sc(44), 0, 0)
+    qd.polygon([off(0, 1, sc(13)), off(0, -1, sc(13)), (tipx, tipy)],
+               fill=(70, 50, 40, 255))
+    qd.line([(tipx, tipy), off(sc(24), 0, 0)], fill=(40, 28, 22, 255), width=sc(4))
+    img.alpha_composite(q)
 
     # --- downsample --------------------------------------------------------
     icon = img.resize((1024, 1024), Image.LANCZOS)
