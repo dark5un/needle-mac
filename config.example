@@ -1,0 +1,25 @@
+# endpoint of the primary (local) engine: Strata, llama.cpp, Ollama, ...
+endpoint          = http://127.0.0.1:8080/v1
+model             = qwen3.8-flash-next-iq3_xxs
+
+# secondary OpenAI-compatible endpoint, used only when the primary fails
+# (server down, HTTP error, empty result). Leave unset (or comment these
+# lines out) for local-only. Example: any OpenAI-compatible server.
+#fallback_endpoint = http://other-host.local:11434/v1
+#fallback_model    = some-model
+# key for the fallback (env NEEDLE_FALLBACK_API_KEY wins if both are set);
+# the file is env-format with one line: API_KEY=***
+#fallback_key_file = ~/.config/needle-mac/engine.env
+#fallback_key_var  = API_KEY
+
+# global hotkey that opens the action palette
+hotkey            = ctrl+opt+o
+# same palette, but the result goes only to the clipboard (no paste injected)
+hotkey_clipboard  = ctrl+opt+i
+
+# combos used for capture (copy) and delivery (paste)
+copy_combo        = cmd+c
+paste_combo       = cmd+v
+
+max_tokens        = 4096
+timeout           = 120

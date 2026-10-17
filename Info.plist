@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>NeedleMac</string>
+  <key>CFBundleDisplayName</key><string>needle-mac</string>
+  <key>CFBundleIdentifier</key><string>local.needle-mac</string>
+  <key>CFBundleExecutable</key><string>needle-mac</string>
+  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleIconFile</key><string>app.icns</string>
+  <key>LSUIElement</key><true/>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+
+  <!-- The Apple-Writing-Tools-style menu: every action appears under
+       Services in any app's text right-click menu. The client hands the
+       selection over and inserts the reply pasteboard itself. -->
+  <key>NSServices</key>
+  <array>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: proofread</string></dict>
+      <key>NSMessage</key><string>svcProofread</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: shorten</string></dict>
+      <key>NSMessage</key><string>svcShorten</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: professional</string></dict>
+      <key>NSMessage</key><string>svcProfessional</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: casual</string></dict>
+      <key>NSMessage</key><string>svcCasual</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: summarize</string></dict>
+      <key>NSMessage</key><string>svcSummarize</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: translate to English</string></dict>
+      <key>NSMessage</key><string>svcTranslateEn</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: translate to Greek</string></dict>
+      <key>NSMessage</key><string>svcTranslateEl</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: agentify</string></dict>
+      <key>NSMessage</key><string>svcAgentify</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: agentify+</string></dict>
+      <key>NSMessage</key><string>svcAgentifyPlus</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: publisher opinion</string></dict>
+      <key>NSMessage</key><string>svcPublisherOpinion</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>needle: book reviewer</string></dict>
+      <key>NSMessage</key><string>svcBookReviewer</string>
+      <key>NSPortName</key><string>needle-mac</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSReturnTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>

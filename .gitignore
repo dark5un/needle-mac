@@ -1,0 +1,5 @@
+# the compiled binary (root-anchored: Sources/needle-mac/ stays tracked)
+/needle-mac
+NeedleMac.app
+icon.iconset/
+dist/
