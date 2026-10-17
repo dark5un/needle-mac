@@ -876,7 +876,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         grant.identifier = NSUserInterfaceItemIdentifier("grant")
         menu.addItem(grant)
         menu.addItem(NSMenuItem(title: "Open Accessibility settings", action: #selector(openAXSettings), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit (until next login)", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+        let disable = NSMenuItem(title: "Quit and disable autostart", action: #selector(disableAutostart), keyEquivalent: "")
+        disable.target = self
+        menu.addItem(disable)
         statusItem.menu = menu
 
         palette = Palette()
@@ -1128,11 +1134,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // Quit for good: launchd's KeepAlive would otherwise relaunch us the
-    // moment we exit. Remove the job first (bootout), then terminate.
+    // Quit for this session only: launchd's KeepAlive would otherwise
+    // relaunch us the moment we exit, so we boot the job out of the GUI
+    // domain first. The plist file stays in ~/Library/LaunchAgents, so the
+    // app comes back by itself at next login.
     @objc func quitApp() {
         let label = "local.needle-mac"
         runShell("launchctl remove \(label) 2>/dev/null; launchctl bootout gui/$(id -u)/\(label) 2>/dev/null; true")
+        NSApp.terminate(nil)
+    }
+
+    // Stop for good: also remove the LaunchAgent file (undo with the
+    // installer, or by recreating the plist).
+    @objc func disableAutostart() {
+        let label = "local.needle-mac"
+        runShell("launchctl remove \(label) 2>/dev/null; launchctl bootout gui/$(id -u)/\(label) 2>/dev/null; rm -f ~/Library/LaunchAgents/\(label).plist; true")
         NSApp.terminate(nil)
     }
 
