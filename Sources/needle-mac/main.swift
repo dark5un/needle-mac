@@ -13,6 +13,7 @@
 
 import Cocoa
 import Carbon.HIToolbox
+import UserNotifications
 
 // MARK: - Logging (a file: launchd stderr is easy to miss)
 
@@ -875,7 +876,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         grant.identifier = NSUserInterfaceItemIdentifier("grant")
         menu.addItem(grant)
         menu.addItem(NSMenuItem(title: "Open Accessibility settings", action: #selector(openAXSettings), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
         statusItem.menu = menu
 
         palette = Palette()
@@ -1127,11 +1128,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // Quit for good: launchd's KeepAlive would otherwise relaunch us the
+    // moment we exit. Remove the job first (bootout), then terminate.
+    @objc func quitApp() {
+        let label = "local.needle-mac"
+        runShell("launchctl remove \(label) 2>/dev/null; launchctl bootout gui/$(id -u)/\(label) 2>/dev/null; true")
+        NSApp.terminate(nil)
+    }
+
+    func runShell(_ cmd: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", cmd]
+        try? p.run()
+        p.waitUntilExit()
+    }
+
     func notify(_ message: String, code: Int) {
-        let n = NSUserNotification()
-        n.title = "needle-mac"
-        n.informativeText = message
-        NSUserNotificationCenter.default.deliver(n)
+        // UserNotifications (the supported API): shows the app's current icon.
+        // The deprecated NSUserNotification path cached icons per bundle and
+        // silently no-ops on recent macOS.
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized ||
+                  settings.authorizationStatus == .provisional else {
+                if settings.authorizationStatus == .notDetermined {
+                    center.requestAuthorization(options: [.alert]) { _, _ in }
+                }
+                return
+            }
+            let content = UNMutableNotificationContent()
+            content.title = "needle-mac"
+            content.body = message
+            let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            center.add(req)
+        }
     }
 }
 
