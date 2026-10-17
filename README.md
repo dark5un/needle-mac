@@ -25,8 +25,8 @@ read at runtime, and are never logged or stored in the config.
 | `ext_data_control` selection read/claim | `NSPasteboard` + synthesized Cmd+C |
 | `zwp_virtual_keyboard` paste | `CGEvent` Cmd+V injection |
 | fuzzel palette | native NSPanel palette (type to filter) |
-| compositor keybind | Carbon global hotkey (default `ctrl+opt+o`) |
-| one-shot binary | resident menu-bar daemon (launchd) |
+| compositor keybind | global hotkey via CGEvent tap (default `ctrl+opt+o`) |
+| one-shot binary | resident menu-bar app (Launch at login toggle) |
 | — (impossible on Wayland) | **Services menu**: every action in any app's text right-click menu, like Apple's Writing Tools — no Accessibility permission needed on that path |
 
 ## Install
@@ -62,7 +62,9 @@ Requirements: macOS 13+, Xcode Command Line Tools (`xcode-select --install`).
 
 Builds `NeedleMac.app`, installs it to `~/Applications`, copies the config to
 `~/.config/needle-mac/config` (existing config is never overwritten), and
-enables autostart via launchd. `--no-autostart` skips the login item.
+launches it. It is a plain app: Quit quits. Autostart is optional and lives
+in the app itself — the menu-bar icon's "Launch at login" toggle (a standard
+login item, managed in System Settings > General > Login Items).
 
 Then:
 1. Edit `~/.config/needle-mac/config` — the primary endpoint should be your

@@ -1,18 +1,16 @@
 #!/bin/sh
 # install.sh — needle-mac installer for a packaged (pre-built) copy.
 # Needs NO dev tools on the target Mac: no Xcode, no swiftc.
-#   ./install.sh                  install + autostart at login
-#   ./install.sh --no-autostart   install only
+#   ./install.sh                  install and launch (autostart is the app's
+#                                 own "Launch at login" menu toggle)
 set -eu
 cd "$(dirname "$0")"
 
 [ -d NeedleMac.app ] || { echo "needle-mac: NeedleMac.app not next to this script" >&2; exit 1; }
 
-NO_AUTOSTART=0
 ENDPOINT="" ; MODEL="" ; FALLBACK_URL="" ; FALLBACK_MODEL="" ; FALLBACK_KEY="" ; KEY=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --no-autostart)  NO_AUTOSTART=1 ;;
         --endpoint)      ENDPOINT="$2"; shift ;;
         --model)         MODEL="$2"; shift ;;
         --key)           KEY="$2"; shift ;;
@@ -74,33 +72,10 @@ fi
     fi
 }
 
-if [ "$NO_AUTOSTART" -eq 0 ]; then
-    PLIST="$HOME/Library/LaunchAgents/local.needle-mac.plist"
-    mkdir -p "$HOME/Library/LaunchAgents"
-    sed "s|@APP@|$APP|g" <<'EOF' > "$PLIST"
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>local.needle-mac</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>@APP@/Contents/MacOS/needle-mac</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/needle-mac.out</string>
-  <key>StandardErrorPath</key><string>/tmp/needle-mac.err</string>
-</dict>
-</plist>
-EOF
-    launchctl unload "$PLIST" 2>/dev/null || true
-    launchctl load "$PLIST"
-    echo "installed + autostart enabled: $APP"
-else
-    open "$APP"
-    echo "installed: $APP"
-fi
+# run once so the Services menu registers; autostart is the app's own
+# "Launch at login" menu toggle (no launchd)
+open "$APP"
+echo "installed: $APP"
 
 echo
 echo "Next steps:"
@@ -109,4 +84,5 @@ echo "     (Strata: http://127.0.0.1:8080/v1, Ollama: http://127.0.0.1:11434/v1)
 echo "     Optional fallback_* keys: a second OpenAI-compatible endpoint."
 echo "  2. System Settings > Privacy & Security > Accessibility: enable needle-mac"
 echo "     (needed for the hotkey path; the Services right-click menu works without it)."
-echo "  3. Select text, press ctrl+opt+o (replace) or ctrl+opt+i (clipboard only)."
+echo "  3. Optional: the menu-bar icon has a 'Launch at login' toggle."
+echo "  4. Select text, press ctrl+opt+o (replace) or ctrl+opt+i (clipboard only)."

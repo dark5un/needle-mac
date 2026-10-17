@@ -14,6 +14,7 @@
 import Cocoa
 import Carbon.HIToolbox
 import UserNotifications
+import ServiceManagement
 
 // MARK: - Logging (a file: launchd stderr is easy to miss)
 
@@ -877,12 +878,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(grant)
         menu.addItem(NSMenuItem(title: "Open Accessibility settings", action: #selector(openAXSettings), keyEquivalent: ""))
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit (until next login)", action: #selector(quitApp), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-        let disable = NSMenuItem(title: "Quit and disable autostart", action: #selector(disableAutostart), keyEquivalent: "")
-        disable.target = self
-        menu.addItem(disable)
+        // login-item toggle (System Settings > General > Login Items)
+        let login = NSMenuItem(title: "Launch at login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        login.target = self
+        login.identifier = NSUserInterfaceItemIdentifier("login")
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(login)
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
 
         palette = Palette()
@@ -1134,22 +1136,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // Quit for this session only: launchd's KeepAlive would otherwise
-    // relaunch us the moment we exit, so we boot the job out of the GUI
-    // domain first. The plist file stays in ~/Library/LaunchAgents, so the
-    // app comes back by itself at next login.
-    @objc func quitApp() {
-        let label = "local.needle-mac"
-        runShell("launchctl remove \(label) 2>/dev/null; launchctl bootout gui/$(id -u)/\(label) 2>/dev/null; true")
-        NSApp.terminate(nil)
-    }
-
-    // Stop for good: also remove the LaunchAgent file (undo with the
-    // installer, or by recreating the plist).
-    @objc func disableAutostart() {
-        let label = "local.needle-mac"
-        runShell("launchctl remove \(label) 2>/dev/null; launchctl bootout gui/$(id -u)/\(label) 2>/dev/null; rm -f ~/Library/LaunchAgents/\(label).plist; true")
-        NSApp.terminate(nil)
+    @objc func toggleLoginItem() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            log("login item toggle failed: \(error.localizedDescription)")
+            finish(message: "could not change Launch at login: \(error.localizedDescription)", code: 1)
+            return
+        }
+        // refresh the checkmark
+        if let item = statusItem.menu?.items.first(where: { $0.identifier?.rawValue == "login" }) {
+            item.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        }
     }
 
     func runShell(_ cmd: String) {
