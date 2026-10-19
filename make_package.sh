@@ -36,14 +36,18 @@ lipo -archs "$APP/Contents/MacOS/needle-mac"
 cp Info.plist "$APP/Contents/Info.plist"
 [ -f NeedleMac.icns ] && cp NeedleMac.icns "$APP/Contents/Resources/app.icns"
 
-# sign: the local developer identity when present, else ad-hoc (both are fine
-# for a copy-based install; the package tar does not set quarantine bits).
-# Any "Apple Development" identity in the keychain is picked automatically.
-IDENTITY=$(security find-identity -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: .*\)".*/\1/p' | head -1)
-if [ -n "$IDENTITY" ]; then
-    codesign --force --deep --sign "$IDENTITY" --identifier local.needle-mac "$APP"
+# sign: CODESIGN_IDENTITY wins (CI sets the Developer ID name); else a local
+# "Apple Development" identity when present; else ad-hoc. Developer ID builds
+# get the hardened runtime, which notarization requires.
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier local.needle-mac "$APP"
 else
-    codesign --force --deep --sign - --identifier local.needle-mac "$APP"
+    IDENTITY=$(security find-identity -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: .*\)".*/\1/p' | head -1)
+    if [ -n "$IDENTITY" ]; then
+        codesign --force --deep --sign "$IDENTITY" --identifier local.needle-mac "$APP"
+    else
+        codesign --force --deep --sign - --identifier local.needle-mac "$APP"
+    fi
 fi
 
 # --- the package payload ----------------------------------------------------
