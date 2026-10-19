@@ -31,10 +31,26 @@ read at runtime, and are never logged or stored in the config.
 
 ## Install
 
-### On another Mac (no dev tools needed)
+### Download (easiest)
 
-Build a package here with `./make_package.sh` (needs the toolchain), then copy
-`dist/needle-mac-<version>-macos.tar.gz` (or `.dmg`) to the other Mac:
+Grab the latest notarized build from
+[Releases](https://github.com/dark5un/needle-mac/releases): either the
+`.dmg` (open it and run `install.command`, or drag the app to Applications
+and run the installer from a terminal) or the `.tar.gz`:
+
+```sh
+tar xzf needle-mac-<version>-macos.tar.gz && cd needle-mac && ./install.sh
+```
+
+Releases are signed with a Developer ID certificate and notarized by Apple,
+so Gatekeeper lets them open with a plain double-click — no quarantine
+workarounds.
+
+### Build a package yourself (no dev tools needed on the target Mac)
+
+Build a package with `./make_package.sh` (needs the toolchain on the build
+Mac), then copy `dist/needle-mac-<version>-macos.tar.gz` (or `.dmg`) to the
+other Mac:
 
 ```sh
 tar xzf needle-mac-0.1-macos.tar.gz && cd needle-mac && ./install.sh
@@ -120,12 +136,22 @@ environment, or from an env-format file named by `key_file` /
 ## Development
 
 ```sh
-./build.sh        # -> needle-mac + NeedleMac.app (ad-hoc signed)
+./build.sh        # -> needle-mac + NeedleMac.app (local dev identity, else ad-hoc)
 ```
 
 Single Swift file (`Sources/needle-mac/main.swift`), no dependencies beyond
 Cocoa/Carbon. The Services menu requires the .app bundle with the `NSServices`
-entries in `Info.plist`; ad-hoc signing keeps the Accessibility grant stable
+entries in `Info.plist`; stable signing keeps the Accessibility grant alive
 across rebuilds.
+
+### Releasing
+
+Push a `v*` tag (or run the Release workflow manually) and
+`.github/workflows/release.yml` builds the universal app, signs it with the
+Developer ID identity, notarizes + staples it, and publishes the `.tar.gz`
+and `.dmg` as a GitHub Release. Signing and notarization credentials live in
+the protected `signing` environment (same secret values as the rhema
+pipeline); every run waits for reviewer approval before the key material is
+exposed.
 
 MIT
