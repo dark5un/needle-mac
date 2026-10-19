@@ -91,8 +91,9 @@ jobs:
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
 
       - name: Publish GitHub Release
-        run: gh release create "$REF" dist/needle-mac-*-macos.tar.gz dist/needle-mac-*-macos.dmg \
-          --title "needle-mac $REF" --generate-notes
+        run: |
+          gh release create "$REF" dist/needle-mac-*-macos.tar.gz dist/needle-mac-*-macos.dmg \
+            --title "needle-mac $REF" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
           REF: ${{ github.ref_name }}
