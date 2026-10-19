@@ -3,3 +3,5 @@
 NeedleMac.app
 icon.iconset/
 dist/
+
+.DS_Store

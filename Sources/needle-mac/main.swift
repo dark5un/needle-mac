@@ -1154,14 +1154,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func runShell(_ cmd: String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", cmd]
-        try? p.run()
-        p.waitUntilExit()
-    }
-
     func notify(_ message: String, code: Int) {
         // UserNotifications (the supported API): shows the app's current icon.
         // The deprecated NSUserNotification path cached icons per bundle and
