@@ -82,8 +82,9 @@ jobs:
           hdiutil create -volname "needle-mac" -srcfolder "$DMG_DIR" -ov -format UDZO \
             "dist/needle-mac-${VER}-macos.dmg" >/dev/null
           rm -rf "$DMG_DIR"
-          xcrun stapler staple "dist/needle-mac-${VER}-macos.dmg"
-          xcrun stapler validate "dist/needle-mac-${VER}-macos.dmg"
+          # no DMG-level staple: the .app inside is stapled (that is what
+          # offline verification needs); the DMG itself was never submitted
+          # to Apple, so stapler has no ticket for it.
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
