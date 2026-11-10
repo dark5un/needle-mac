@@ -23,3 +23,20 @@ paste_combo       = cmd+v
 
 max_tokens        = 4096
 timeout           = 120
+
+# --- Hermes agent engine ("take to hermes") ------------------------------
+# The hermes / hermes-ask actions run the full Hermes Agent CLI as a
+# subprocess (memory, skills, and one persistent named conversation)
+# instead of the HTTP engine above. Availability is probed and warned
+# visibly when hermes is not reachable — there is NO silent fallback.
+hermes_command      = hermes              # binary name or path; ~ is expanded
+hermes_session      = needle-mac          # named Hermes session, kept across actions
+hermes_timeout      = 600                 # seconds; agent tasks run long
+# needle-mac does NOT change Hermes: by default it passes no policy flags
+# at all and the session it creates inherits Hermes' own config. Only the
+# lines you uncomment are sent (exactly once, at session creation):
+# hermes_toolsets     = terminal,file     # -t list
+# hermes_max_turns    = 30
+# Opt in to falling back to the HTTP engine above when hermes is down
+# (off by default — sending the text elsewhere is a privacy surprise):
+# hermes_fallback     = engine
