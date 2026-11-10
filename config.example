@@ -25,18 +25,23 @@ max_tokens        = 4096
 timeout           = 120
 
 # --- Hermes agent engine ("take to hermes") ------------------------------
-# The hermes / hermes-ask actions run the full Hermes Agent CLI as a
-# subprocess (memory, skills, and one persistent named conversation)
-# instead of the HTTP engine above. Availability is probed and warned
-# visibly when hermes is not reachable — there is NO silent fallback.
+# The hermes / hermes-ask actions run the Hermes Agent CLI as a subprocess
+# in LOCKDOWN mode: Hermes' own config.yaml is NOT loaded (--ignore-user-
+# config), so MCP servers, plugins and hosted-provider fallbacks do not
+# exist for these calls. Routing is explicit and pinned per call:
+#   provider=custom, base_url below (default: endpoint), model (default:
+#   model), api key via the existing key_file/NEEDLE_API_KEY mechanism.
+# Toolsets are fixed by needle-mac, never by selection text: "hermes" may
+# use web_search/web_extract for information retrieval ONLY; "hermes-ask"
+# has no tools at all. No shell, no files, no subagents, no MCP — ever.
 hermes_command      = hermes              # binary name or path; ~ is expanded
 hermes_session      = needle-mac          # named Hermes session, kept across actions
-hermes_timeout      = 600                 # seconds; agent tasks run long
-# needle-mac does NOT change Hermes: by default it passes no policy flags
-# at all and the session it creates inherits Hermes' own config. Only the
-# lines you uncomment are sent (exactly once, at session creation):
-# hermes_toolsets     = terminal,file     # -t list
-# hermes_max_turns    = 30
+hermes_timeout      = 600                 # seconds; wall-clock kill switch
+# hermes_base_url     = http://127.0.0.1:8080/v1   # default: the endpoint above
+# hermes_model        = some-model                 # default: the model above;
+#        pick via `needle-mac hermes-models` or the menu's Discover item.
+#        (changing it applies to the next NEW hermes_session)
+# hermes_max_turns    = 10                # tool-loop cap (web lookups)
 # Opt in to falling back to the HTTP engine above when hermes is down
 # (off by default — sending the text elsewhere is a privacy surprise):
 # hermes_fallback     = engine
