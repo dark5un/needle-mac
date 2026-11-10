@@ -1198,11 +1198,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // async Hermes availability probe at daemon start (hermes --version)
         Task { _ = await HermesRunner.shared.probe(c) }
         palette = Palette()
-        if !hotkey.register(c.hotkey, action: { [weak self] in self?.openPalette(clipboardOnly: false) }) {
-            FileHandle.standardError.write("needle-mac: could not register hotkey '\(c.hotkey)'\n".data(using: .utf8)!)
-        }
-        if !hotkeyClip.register(c.hotkeyClipboard, action: { [weak self] in self?.openPalette(clipboardOnly: true) }) {
-            FileHandle.standardError.write("needle-mac: could not register hotkey '\(c.hotkeyClipboard)'\n".data(using: .utf8)!)
+        if !ensureHotkeys() {
+            // An ad-hoc rebuild silently loses the Accessibility grant, and
+            // the tap cannot be created until it is back: keep retrying so
+            // the hotkey starts working the moment the user enables the
+            // toggle — no relaunch required.
+            FileHandle.standardError.write("needle-mac: hotkey tap(s) not registered (Accessibility?) — retrying every 3s until granted\n".data(using: .utf8)!)
+            startHotkeyRetry()
         }
         if !AXIsProcessTrusted() {
             let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
@@ -1215,6 +1217,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.palette.show(actions: Actions.builtins, captured: "demo: this text would be your selection",
                                    onPick: { _ in }, onCancel: {})
+            }
+        }
+    }
+
+    // (re-)register both palette hotkeys; Hotkey.register tears down any
+    // previous tap first, so calling this repeatedly is safe.
+    func ensureHotkeys() -> Bool {
+        guard let c = cfg else { return false }
+        let a = hotkey.register(c.hotkey, action: { [weak self] in self?.openPalette(clipboardOnly: false) })
+        let b = hotkeyClip.register(c.hotkeyClipboard, action: { [weak self] in self?.openPalette(clipboardOnly: true) })
+        return a && b
+    }
+
+    private var hotkeyRetryTimer: Timer?
+
+    // CGEvent taps need the Accessibility grant; ad-hoc rebuilds drop it.
+    // Poll until the grant is back, register the taps then, and stop.
+    func startHotkeyRetry() {
+        guard hotkeyRetryTimer == nil else { return }
+        hotkeyRetryTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            guard AXIsProcessTrusted() else { return }
+            if self.ensureHotkeys() {
+                t.invalidate()
+                self.hotkeyRetryTimer = nil
+                log("hotkey taps registered after Accessibility grant")
             }
         }
     }
