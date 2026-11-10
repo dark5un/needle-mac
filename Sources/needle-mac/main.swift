@@ -51,11 +51,23 @@ struct Config {
     var hotkeyClipboard = "ctrl+opt+i"
     var maxTokens = 4096
     var timeoutSec = 120.0
+    // Hermes agent backend (per-action; see HermesRunner): the hermes
+    // actions run the full agent CLI instead of an HTTP completion.
+    var hermesCommand = "hermes"        // binary name or path (~ expanded)
+    var hermesSession = "needle-mac"    // named Hermes session (continuity)
+    var hermesTimeoutSec = 600.0        // agent tasks run long
+    // needle-mac must not change Hermes: these overrides are never sent
+    // unless explicitly configured — the session gets Hermes' own policy.
+    var hermesToolsets: String? = nil   // -t list, only at session creation
+    var hermesMaxTurns: Int? = nil      // --max-turns, only at session creation
+    var hermesFallback: String? = nil   // "engine" = opt in if hermes is down
 
     static let knownKeys: Set<String> = [
         "endpoint", "model", "key_file", "key_var",
         "fallback_endpoint", "fallback_model", "fallback_key_file", "fallback_key_var",
         "paste_combo", "copy_combo", "hotkey", "hotkey_clipboard", "max_tokens", "timeout",
+        "hermes_command", "hermes_session", "hermes_timeout", "hermes_toolsets",
+        "hermes_max_turns", "hermes_fallback",
     ]
 
     static func configPath() -> URL {
@@ -110,6 +122,12 @@ struct Config {
             case "hotkey_clipboard": c.hotkeyClipboard = value
             case "max_tokens": c.maxTokens = min(max(Int(value) ?? c.maxTokens, 1), 32768)
             case "timeout": c.timeoutSec = Double(value) ?? c.timeoutSec
+            case "hermes_command": c.hermesCommand = value
+            case "hermes_session": c.hermesSession = value
+            case "hermes_timeout": c.hermesTimeoutSec = max(Double(value) ?? c.hermesTimeoutSec, 5)
+            case "hermes_toolsets": c.hermesToolsets = value.isEmpty ? nil : value
+            case "hermes_max_turns": if let n = Int(value) { c.hermesMaxTurns = min(max(n, 1), 500) }
+            case "hermes_fallback": c.hermesFallback = value.isEmpty ? nil : value
             default: break
             }
         }
@@ -151,6 +169,7 @@ struct Action {
     let description: String
     let systemPrompt: String
     let temperature: Double
+    var viaHermes: Bool = false   // run through the Hermes agent, not the HTTP engine
 }
 
 enum Actions {
@@ -212,6 +231,12 @@ enum Actions {
                Output ONLY those two parts, no preamble or code fences.
                """,
                temperature: 0.6),
+        Action(name: "hermes", description: "Take to Hermes agent — keeps one ongoing conversation",
+               systemPrompt: "The user's selected text is below. Treat it as their message to you: act on it fully (answer, fix, explain, or execute if tools allow) and reply with only the final result text.",
+               temperature: 0.4, viaHermes: true),
+        Action(name: "hermes-ask", description: "Ask the Hermes agent, tools off (memory + conversation only)",
+               systemPrompt: "The user's selected text is below. Treat it as their message to you and reply with only the final answer text. Do NOT use any tools.",
+               temperature: 0.4, viaHermes: true),
     ]
 
     static func get(_ name: String) -> Action? {
@@ -280,6 +305,22 @@ final class Engine {
         if runes.count > Actions.maxSelectionRunes {
             throw EngineError(message: "selection too large: \(runes.count) runes (max \(Actions.maxSelectionRunes))")
         }
+        // Hermes-routed actions: agent subprocess engine. Availability is
+        // checked inside; failure warns visibly (no silent fallback unless
+        // hermes_fallback = engine).
+        if action.viaHermes {
+            do {
+                return try await HermesRunner.shared.run(action: action, cfg: cfg, text: text)
+            } catch let e as EngineError where cfg.hermesFallback == "engine" {
+                log("WARNING: \(e.message) — hermes_fallback=engine, routing through the HTTP engine instead")
+            }
+        }
+        return try await runOpenAI(action: action, text: text)
+    }
+
+    // The OpenAI-compatible HTTP path: primary local engine first, the
+    // secondary endpoint only when the primary fails.
+    private func runOpenAI(action: Action, text: String) async throws -> Result {
         do {
             let out = try await complete(action: action, text: text,
                                          endpoint: cfg.endpoint, model: cfg.model,
@@ -355,6 +396,263 @@ final class Engine {
         let out = Cleaner.clean(content)
         if out.isEmpty { throw EngineError(message: "engine returned an empty result") }
         return out
+    }
+}
+
+// MARK: - HermesRunner (the Hermes agent as a subprocess engine)
+
+// Hermes-routed actions ("hermes", "hermes-ask") do not call the HTTP
+// engine: they spawn the Hermes agent CLI, so the selection reaches the
+// full agent — memory, skills, and a persistent named session. Repeat
+// invocations continue the same conversation from any app.
+//
+// Verified invocation contract (take-to-Hermes plan §2):
+//   resume: hermes chat --query-file - -Q --oneshot --continue <session>
+//   create: same + --create-if-missing (plus -t / --max-turns ONLY if the
+//   user configured them — needle-mac does not change Hermes by default)
+//   stdin carries the query VERBATIM (quotes/$()/backticks are never
+//   shell-interpreted); stdout is the final response only; the last
+//   stderr line is "session_id: ..."; exit 0 on success.
+//   Creation flags must be sent exactly once: -t/--max-turns on a
+//   resume of an existing session fails ("Resume retains ... policy").
+//
+// Session bookkeeping is therefore stateless: always try a plain resume
+// first; only when hermes reports "No session found matching" retry once
+// WITH the creation flags. Survives daemon restarts and one-shot CLI use.
+final class HermesRunner {
+    static let shared = HermesRunner()
+
+    struct Probe { let path: String?; let detail: String }
+    struct HermesTimeout: Error { let message: String }
+
+    private let lock = NSLock()
+    private var cachedPath: String?
+    private var probeAt = Date.distantPast
+    private var statusLine = "Hermes: checking…"
+    private let probeCacheSec: TimeInterval = 60
+
+    private final class BoolBox {
+        private let l = NSLock()
+        private var v = false
+        func set() { l.lock(); v = true; l.unlock() }
+        var value: Bool { l.lock(); defer { l.unlock() }; return v }
+    }
+
+    // Menu-bar row text (thread-safe snapshot).
+    func menuStatus() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return statusLine
+    }
+
+    // Absolute binary resolution (GUI-launched apps get a slim PATH): the
+    // configured value — a path (~ expanded) or a name searched on PATH —
+    // then the well-known Hermes install locations.
+    private func resolve(_ cfg: Config) -> String? {
+        var cands: [String] = []
+        let cmd = cfg.hermesCommand.trimmingCharacters(in: .whitespaces)
+        if !cmd.isEmpty {
+            if cmd.contains("/") {
+                cands.append((cmd as NSString).expandingTildeInPath)
+            } else {
+                for dir in (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":") {
+                    cands.append("\(dir)/\(cmd)")
+                }
+            }
+        }
+        if cmd.isEmpty || (cmd as NSString).lastPathComponent == "hermes" {
+            let home = NSHomeDirectory()
+            cands += ["\(home)/.local/bin/hermes", "/opt/homebrew/bin/hermes", "/usr/local/bin/hermes"]
+        }
+        let fm = FileManager.default
+        return cands.first { fm.isExecutableFile(atPath: $0) }
+    }
+
+    // Availability: `hermes --version` (~0.6s, offline-safe), cached; a
+    // fresh cache answers without any subprocess unless forced.
+    // Synchronous cached-state access (NSLock outside async contexts).
+    private func cachedFreshPath(_ force: Bool) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        if !force && Date().timeIntervalSince(probeAt) < probeCacheSec, let c = cachedPath { return c }
+        return nil
+    }
+
+    func probe(_ cfg: Config, force: Bool = false) async -> Probe {
+        if let c = cachedFreshPath(force), FileManager.default.isExecutableFile(atPath: c) {
+            return Probe(path: c, detail: "cached")
+        }
+        guard let path = resolve(cfg) else {
+            noteProbe(nil, "Hermes: NOT FOUND (or not runnable) — set hermes_command")
+            return Probe(path: nil, detail: "not found")
+        }
+        let r: (code: Int32, out: String, err: String)
+        do {
+            r = try await exec(path, ["--version"], stdinText: nil, timeoutSec: 15)
+        } catch {
+            noteProbe(nil, "Hermes: NOT FOUND (or not runnable) — \(error.localizedDescription)")
+            return Probe(path: nil, detail: "not runnable")
+        }
+        guard r.code == 0 else {
+            let why = Self.tail(r.err)
+            noteProbe(nil, "Hermes: NOT FOUND (or not runnable) — exit \(r.code)\(why.isEmpty ? "" : ": \(why)")")
+            return Probe(path: nil, detail: "exit \(r.code)")
+        }
+        let ver = r.out.split(separator: "\n").first.map(String.init)
+            ?? r.err.split(separator: "\n").first.map(String.init) ?? "ok"
+        noteProbe(path, "Hermes: available — \(ver)")
+        return Probe(path: path, detail: ver)
+    }
+
+    // A successful/failed probe updates the row and clears run errors.
+    private func noteProbe(_ path: String?, _ status: String) {
+        lock.lock(); cachedPath = path; probeAt = Date(); statusLine = status; lock.unlock()
+    }
+
+    // A failed run flips the row to "Hermes: error — …" until the next
+    // successful probe (menuWillOpen re-probes whenever the cache is stale).
+    private func noteRunError(_ reason: String) {
+        lock.lock(); statusLine = "Hermes: error — \(reason)"; lock.unlock()
+    }
+
+    func run(action: Action, cfg: Config, text: String) async throws -> Engine.Result {
+        let p = await probe(cfg)
+        guard let path = p.path else {
+            // No silent fallback: the user chose Hermes for this action.
+            throw Engine.EngineError(message: "hermes not reachable at '\(cfg.hermesCommand)' — install it or set hermes_command; other actions still work")
+        }
+        // The Hermes CLI has no system-prompt flag, so the action's
+        // instruction heads the query and the selection follows verbatim.
+        let query = action.systemPrompt + "\n\n" + text
+
+        // hermes-ask keeps its own session: the tools-off (-t '') guarantee
+        // can only be enforced at session creation, so it must not share a
+        // session that "hermes" may have created with tools enabled.
+        let session = action.name == "hermes-ask" ? cfg.hermesSession + "-ask" : cfg.hermesSession
+        var args = ["chat", "--query-file", "-", "-Q", "--oneshot",
+                    "--continue", session]
+        var r: (code: Int32, out: String, err: String)
+        do {
+            r = try await exec(path, args, stdinText: query, timeoutSec: cfg.hermesTimeoutSec)
+            if r.code != 0 && (r.err + r.out).contains("No session found matching") {
+                // First-ever use of the session name: create it, sending
+                // creation flags exactly once. needle-mac never changes
+                // Hermes: no -t / --max-turns unless the user explicitly
+                // configured them — the session inherits Hermes' own
+                // policy. (hermes-ask forces -t '': that reduces rights,
+                // it does not change Hermes.)
+                args.append("--create-if-missing")
+                if action.name == "hermes-ask" {
+                    args += ["-t", ""]
+                } else if let ts = cfg.hermesToolsets {
+                    args += ["-t", ts]
+                }
+                if let mt = cfg.hermesMaxTurns {
+                    args += ["--max-turns", String(mt)]
+                }
+                r = try await exec(path, args, stdinText: query, timeoutSec: cfg.hermesTimeoutSec)
+            }
+        } catch let e as HermesTimeout {
+            noteRunError(e.message)
+            throw Engine.EngineError(message: e.message)
+        }
+        guard r.code == 0 else {
+            let why = Self.tail(r.err)
+            noteRunError(why.isEmpty ? "exit \(r.code)" : why)
+            log("WARNING: hermes run failed (exit \(r.code))\(why.isEmpty ? "" : ": \(why)")")
+            throw Engine.EngineError(message: "hermes failed (exit \(r.code))\(why.isEmpty ? "" : ": \(why)")")
+        }
+        if let sid = Self.sessionId(from: r.err) { log(sid) }
+        let cleaned = Cleaner.clean(r.out)
+        guard !cleaned.isEmpty else {
+            noteRunError("empty response")
+            throw Engine.EngineError(message: "hermes returned an empty response")
+        }
+        return Engine.Result(text: cleaned, source: "hermes")
+    }
+
+    // One hermes invocation on a background thread: write stdin, then
+    // drain the pipes (hermes reads the whole query before it emits any
+    // output, so there is no pipe deadlock), with a hard timeout that
+    // escalates SIGINT -> SIGTERM.
+    private func exec(_ path: String, _ args: [String], stdinText: String?, timeoutSec: TimeInterval)
+        async throws -> (code: Int32, out: String, err: String) {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(code: Int32, out: String, err: String), Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: path)
+                proc.arguments = args
+                proc.environment = Self.childEnvironment()
+                let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
+                proc.standardInput = inPipe
+                proc.standardOutput = outPipe
+                proc.standardError = errPipe
+                do {
+                    try proc.run()
+                } catch {
+                    cont.resume(throwing: Engine.EngineError(message: "cannot launch '\(path)': \(error.localizedDescription)"))
+                    return
+                }
+                let timedOut = BoolBox()
+                let killer = DispatchWorkItem {
+                    if proc.isRunning {
+                        timedOut.set()
+                        proc.interrupt()
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+                            if proc.isRunning { proc.terminate() }
+                        }
+                    }
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSec, execute: killer)
+                if let q = stdinText {
+                    try? inPipe.fileHandleForWriting.write(contentsOf: Data(q.utf8))
+                }
+                try? inPipe.fileHandleForWriting.close()
+                let out = String(decoding: outPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                let err = String(decoding: errPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                // EOF can arrive before the process exits (hermes flushes its
+                // output, then finishes cleanup): wait before reading status.
+                proc.waitUntilExit()
+                let code = proc.terminationStatus
+                killer.cancel()
+                if timedOut.value {
+                    cont.resume(throwing: HermesTimeout(message: "hermes timed out after \(Int(timeoutSec))s and was killed"))
+                } else {
+                    cont.resume(returning: (code: code, out: out, err: err))
+                }
+            }
+        }
+    }
+
+    // Clean environment for the child: a GUI-launched app has a slim one,
+    // and inherited PYTHONPATH/venv vars from some parent must never leak
+    // into hermes' own interpreter environment.
+    static func childEnvironment() -> [String: String] {
+        let src = ProcessInfo.processInfo.environment
+        var env: [String: String] = [
+            "LANG": src["LANG"] ?? "en_US.UTF-8",
+            "TMPDIR": src["TMPDIR"] ?? NSTemporaryDirectory(),
+        ]
+        for k in ["HOME", "USER", "LOGNAME", "SHELL"] { if let v = src[k] { env[k] = v } }
+        for (k, v) in src where k.hasPrefix("LC_") { env[k] = v }
+        let home = env["HOME"] ?? NSHomeDirectory()
+        env["HOME"] = home
+        var path = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:\(home)/.local/bin"
+        if let p = src["PATH"], !p.isEmpty { path += ":" + p }
+        env["PATH"] = path
+        return env
+    }
+
+    private static func sessionId(from err: String) -> String? {
+        err.split(separator: "\n").reversed()
+            .first { $0.hasPrefix("session_id:") }
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+    }
+
+    // Last non-empty stderr lines, capped — for the log and menu row,
+    // never a paste of the whole transcript.
+    private static func tail(_ s: String, cap: Int = 240) -> String {
+        let lines = s.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let t = lines.suffix(2).joined(separator: " | ")
+        return t.count > cap ? String(t.prefix(cap)) + "…" : t
     }
 }
 
@@ -784,6 +1082,12 @@ final class ServiceHandler: NSObject {
     @objc func svcBookReviewer(_ pboard: NSPasteboard, userData: String, error: NSErrorPointer) -> NSPasteboard {
         handle("book-reviewer", pboard, error: error)
     }
+    @objc func svcHermes(_ pboard: NSPasteboard, userData: String, error: NSErrorPointer) -> NSPasteboard {
+        handle("hermes", pboard, error: error)
+    }
+    @objc func svcHermesAsk(_ pboard: NSPasteboard, userData: String, error: NSErrorPointer) -> NSPasteboard {
+        handle("hermes-ask", pboard, error: error)
+    }
 
     private func handle(_ name: String, _ pboard: NSPasteboard, error: NSErrorPointer) -> NSPasteboard {
         let out = NSPasteboard()
@@ -877,6 +1181,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         grant.identifier = NSUserInterfaceItemIdentifier("grant")
         menu.addItem(grant)
         menu.addItem(NSMenuItem(title: "Open Accessibility settings", action: #selector(openAXSettings), keyEquivalent: ""))
+        let hrow = NSMenuItem(title: HermesRunner.shared.menuStatus(), action: nil, keyEquivalent: "")
+        hrow.isEnabled = false
+        hrow.identifier = NSUserInterfaceItemIdentifier("hermes")
+        menu.addItem(hrow)
         menu.addItem(.separator())
         // login-item toggle (System Settings > General > Login Items)
         let login = NSMenuItem(title: "Launch at login", action: #selector(toggleLoginItem), keyEquivalent: "")
@@ -887,6 +1195,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
 
+        // async Hermes availability probe at daemon start (hermes --version)
+        Task { _ = await HermesRunner.shared.probe(c) }
         palette = Palette()
         if !hotkey.register(c.hotkey, action: { [weak self] in self?.openPalette(clipboardOnly: false) }) {
             FileHandle.standardError.write("needle-mac: could not register hotkey '\(c.hotkey)'\n".data(using: .utf8)!)
@@ -917,6 +1227,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if let grant = menu.items.first(where: { $0.identifier?.rawValue == "grant" }) {
             grant.isHidden = trusted
+        }
+        if let h = menu.items.first(where: { $0.identifier?.rawValue == "hermes" }) {
+            h.title = HermesRunner.shared.menuStatus()
+            // re-probe in the background when the cache is >60s old
+            guard let c = cfg else { return }
+            Task {
+                _ = await HermesRunner.shared.probe(c)
+                await MainActor.run {
+                    if let row = self.statusItem.menu?.items.first(where: { $0.identifier?.rawValue == "hermes" }) {
+                        row.title = HermesRunner.shared.menuStatus()
+                    }
+                }
+            }
         }
     }
 
@@ -1018,7 +1341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func runAction(_ action: Action, selection: String, axElement: AXUIElement?, frontApp: NSRunningApplication?, clipboardOnly: Bool) {
         guard !busy else { return }
         busy = true
-        startBusyAnimation()
+        startBusyAnimation(prefix: action.viaHermes ? "H" : "✎")
         let pasteCombo = cfg.pasteCombo
         Task { [weak self] in
             guard let self else { return }
@@ -1033,7 +1356,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.deliver(r.text, axElement: axElement, frontPID: frontApp?.processIdentifier, pasteCombo: pasteCombo, source: r.source, clipboardOnly: clipboardOnly)
                 }
             } catch let e as Engine.EngineError {
-                self.finish(message: "\(action.name) failed — \(e.message)", code: 1)
+                // a Hermes availability/run failure shows ⚠ on the icon
+                self.finish(message: "\(action.name) failed — \(e.message)", code: 1,
+                            title: action.viaHermes ? "⚠ !" : nil)
             } catch {
                 self.finish(message: "\(action.name) failed — \(error.localizedDescription)", code: 1)
             }
@@ -1045,12 +1370,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var busyTimer: Timer?
     private var busyDots = 0
 
-    func startBusyAnimation() {
+    func startBusyAnimation(prefix: String = "✎") {
         busyDots = 0
         busyTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.busyDots = (self.busyDots + 1) % 4
-            self.statusItem.button?.title = "✎" + String(repeating: ".", count: self.busyDots)
+            self.statusItem.button?.title = prefix + String(repeating: ".", count: self.busyDots)
         }
     }
 
@@ -1109,11 +1434,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func finish(message: String, code: Int) {
+    func finish(message: String, code: Int, title: String? = nil) {
         DispatchQueue.main.async {
             self.busy = false
             self.stopBusyAnimation()
-            self.statusItem.button?.title = code == 0 ? "✎ ✓" : "✎ !"
+            self.statusItem.button?.title = title ?? (code == 0 ? "✎ ✓" : "✎ !")
             self.notify(message, code: code)
             if code != 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
