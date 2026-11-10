@@ -56,18 +56,27 @@ struct Config {
     var hermesCommand = "hermes"        // binary name or path (~ expanded)
     var hermesSession = "needle-mac"    // named Hermes session (continuity)
     var hermesTimeoutSec = 600.0        // agent tasks run long
-    // needle-mac must not change Hermes: these overrides are never sent
-    // unless explicitly configured — the session gets Hermes' own policy.
-    var hermesToolsets: String? = nil   // -t list, only at session creation
-    var hermesMaxTurns: Int? = nil      // --max-turns, only at session creation
+    // SECURITY LOCKDOWN (not configurable by design):
+    // Every hermes call runs with --ignore-user-config: Hermes' own
+    // config.yaml is NOT loaded, so no MCP servers, plugins, or hosted
+    // provider fallbacks exist in the child at all. Routing is explicit:
+    // --provider custom --base-url (hermes_base_url, default: endpoint)
+    // -m (hermes_model, default: model) --api-key (existing key_file /
+    // NEEDLE_API_KEY resolution; passed to the child process only,
+    // never logged). Toolsets are pinned at creation and repeated on
+    // every resume: "hermes" gets ONLY web_search/web_extract (info
+    // retrieval, user-approved); "hermes-ask" gets nothing.
+    var hermesBaseUrl = ""              // hermes routing (falls back to endpoint)
+    var hermesModel = ""                // hermes model id (falls back to model)
+    var hermesMaxTurns: Int? = nil      // --max-turns per run (default 10)
     var hermesFallback: String? = nil   // "engine" = opt in if hermes is down
 
     static let knownKeys: Set<String> = [
         "endpoint", "model", "key_file", "key_var",
         "fallback_endpoint", "fallback_model", "fallback_key_file", "fallback_key_var",
         "paste_combo", "copy_combo", "hotkey", "hotkey_clipboard", "max_tokens", "timeout",
-        "hermes_command", "hermes_session", "hermes_timeout", "hermes_toolsets",
-        "hermes_max_turns", "hermes_fallback",
+        "hermes_command", "hermes_session", "hermes_timeout", "hermes_base_url",
+        "hermes_model", "hermes_max_turns", "hermes_fallback",
     ]
 
     static func configPath() -> URL {
@@ -125,7 +134,8 @@ struct Config {
             case "hermes_command": c.hermesCommand = value
             case "hermes_session": c.hermesSession = value
             case "hermes_timeout": c.hermesTimeoutSec = max(Double(value) ?? c.hermesTimeoutSec, 5)
-            case "hermes_toolsets": c.hermesToolsets = value.isEmpty ? nil : value
+            case "hermes_base_url": c.hermesBaseUrl = value
+            case "hermes_model": c.hermesModel = value
             case "hermes_max_turns": if let n = Int(value) { c.hermesMaxTurns = min(max(n, 1), 500) }
             case "hermes_fallback": c.hermesFallback = value.isEmpty ? nil : value
             default: break
@@ -146,6 +156,28 @@ struct Config {
             guard let path = fallbackKeyFile, let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
             return Self.keyFromEnvFile(text, names: [fallbackKeyVar, "NEEDLE_API_KEY"])
         }
+    }
+
+    // Update (or append) one "key = value" line in the config file,
+    // leaving every other line untouched (model discovery writes through
+    // this; commented lines are never matched).
+    static func setValue(key: String, value: String) throws {
+        let url = configPath()
+        var lines: [String]
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
+            lines = text.components(separatedBy: "\n")
+        } else {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            lines = []
+        }
+        let re = try NSRegularExpression(pattern: "^[ \t]*\(NSRegularExpression.escapedPattern(for: key))[ \t]*=")
+        var replaced = false
+        for (i, l) in lines.enumerated() where re.firstMatch(in: l, range: NSRange(l.startIndex..., in: l)) != nil {
+            lines[i] = "\(key) = \(value)"
+            replaced = true
+        }
+        if !replaced { lines.append("\(key) = \(value)") }
+        try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
     static func keyFromEnvFile(_ text: String, names: [String]) -> String? {
@@ -231,10 +263,10 @@ enum Actions {
                Output ONLY those two parts, no preamble or code fences.
                """,
                temperature: 0.6),
-        Action(name: "hermes", description: "Take to Hermes agent — keeps one ongoing conversation",
-               systemPrompt: "The user's selected text is below. Treat it as their message to you: act on it fully (answer, fix, explain, or execute if tools allow) and reply with only the final result text.",
+        Action(name: "hermes", description: "Take to Hermes agent — web lookup only, one ongoing conversation",
+               systemPrompt: "The user's selected text is below. Treat it as their message to you: answer, fix, explain or draft it, and reply with only the final result text. You may use web_search/web_extract for information retrieval only; you have no other tools: never run commands, touch files, or spawn subagents.",
                temperature: 0.4, viaHermes: true),
-        Action(name: "hermes-ask", description: "Ask the Hermes agent, tools off (memory + conversation only)",
+        Action(name: "hermes-ask", description: "Ask the Hermes agent — strictly no tools",
                systemPrompt: "The user's selected text is below. Treat it as their message to you and reply with only the final answer text. Do NOT use any tools.",
                temperature: 0.4, viaHermes: true),
     ]
@@ -402,23 +434,37 @@ final class Engine {
 // MARK: - HermesRunner (the Hermes agent as a subprocess engine)
 
 // Hermes-routed actions ("hermes", "hermes-ask") do not call the HTTP
-// engine: they spawn the Hermes agent CLI, so the selection reaches the
-// full agent — memory, skills, and a persistent named session. Repeat
-// invocations continue the same conversation from any app.
+// engine: they spawn the Hermes agent CLI with a persistent named session,
+// so repeated invocations continue the same conversation from any app.
 //
-// Verified invocation contract (take-to-Hermes plan §2):
-//   resume: hermes chat --query-file - -Q --oneshot --continue <session>
-//   create: same + --create-if-missing (plus -t / --max-turns ONLY if the
-//   user configured them — needle-mac does not change Hermes by default)
-//   stdin carries the query VERBATIM (quotes/$()/backticks are never
-//   shell-interpreted); stdout is the final response only; the last
-//   stderr line is "session_id: ..."; exit 0 on success.
-//   Creation flags must be sent exactly once: -t/--max-turns on a
-//   resume of an existing session fails ("Resume retains ... policy").
+// LOCKDOWN CONTRACT (verified on this machine, v0.23.0):
+//   hermes chat --query-file - -Q --oneshot --continue <session> --create-if-missing
+//     --ignore-user-config                      # no MCP servers, no plugins,
+//                                               # no hosted-provider fallback: the
+//                                               # child cannot reach anything the
+//                                               # user's config.yaml grants
+//     --provider custom --base-url <route> -m <model> [--api-key <k>]
+//     -t <web|''> --max-turns <N>               # "hermes": ONLY web_search +
+//                                               # web_extract (user-approved info
+//                                               # retrieval); "hermes-ask": none.
+//                                               # The deferred tool_search/tool_call
+//                                               # machinery does not even exist in
+//                                               # these sessions (tested: file write
+//                                               # and MCP escalation both UNAVAILABLE).
+//   --query-file - carries the query VERBATIM on stdin ($(), backticks,
+//   quotes never interpreted); stdout = the final response only; last
+//   stderr line = "session_id: ..."; exit 0 on success.
 //
-// Session bookkeeping is therefore stateless: always try a plain resume
-// first; only when hermes reports "No session found matching" retry once
-// WITH the creation flags. Survives daemon restarts and one-shot CLI use.
+// One uniform flag set is sent on EVERY call (create and resume): hermes'
+// resume policy check accepts repeating the launch flags verbatim and
+// ignores --api-key in the comparison. Changing hermes_base_url /
+// hermes_model / -t against an existing session is a policy mismatch by
+// design — bump hermes_session (or delete the old one) to re-route.
+//
+// Cost surface: exactly one chat call against the user's own endpoint per
+// action, plus (hermes only) web_search/web_extract fetches. No delegation,
+// no subagents, no shell, no files, no MCP — selected text (untrusted
+// input) cannot trigger anything else.
 final class HermesRunner {
     static let shared = HermesRunner()
 
@@ -442,6 +488,11 @@ final class HermesRunner {
     func menuStatus() -> String {
         lock.lock(); defer { lock.unlock() }
         return statusLine
+    }
+
+    // Drop the cached availability probe (route/config changed).
+    func invalidateProbe() {
+        lock.lock(); probeAt = Date.distantPast; lock.unlock()
     }
 
     // Absolute binary resolution (GUI-launched apps get a slim PATH): the
@@ -513,6 +564,31 @@ final class HermesRunner {
         lock.lock(); statusLine = "Hermes: error — \(reason)"; lock.unlock()
     }
 
+    // Model discovery for the hermes route: GET <base>/models with the
+    // same key resolution the lockdown uses, so the user can pick
+    // hermes_model from what the route actually serves. Nothing else is
+    // contacted and the key is never logged.
+    static func discoverModels(cfg: Config) async throws -> [String] {
+        let base = cfg.hermesBaseUrl.isEmpty ? cfg.endpoint : cfg.hermesBaseUrl
+        guard let url = URL(string: base)?.appendingPathComponent("models") else {
+            throw Engine.EngineError(message: "bad hermes route: \(base)")
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 15
+        if let key = cfg.resolveKey(primary: true), !key.isEmpty {
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw Engine.EngineError(message: "hermes route HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = obj["data"] as? [[String: Any]] else {
+            throw Engine.EngineError(message: "no model list on this route")
+        }
+        return arr.compactMap { $0["id"] as? String }.sorted()
+    }
+
     func run(action: Action, cfg: Config, text: String) async throws -> Engine.Result {
         let p = await probe(cfg)
         guard let path = p.path else {
@@ -523,39 +599,42 @@ final class HermesRunner {
         // instruction heads the query and the selection follows verbatim.
         let query = action.systemPrompt + "\n\n" + text
 
-        // hermes-ask keeps its own session: the tools-off (-t '') guarantee
-        // can only be enforced at session creation, so it must not share a
-        // session that "hermes" may have created with tools enabled.
+        // One uniform invocation for create AND every resume. The lockdown
+        // is enforced on each call (--ignore-user-config strips MCP/plugins/
+        // hosted fallbacks from the child; explicit custom routing; pinned
+        // toolsets). check_resume_policy accepts a resume that repeats the
+        // session's launch flags, and --api-key is excluded from that
+        // comparison — so re-sending the identical set is always valid.
+        let base = cfg.hermesBaseUrl.isEmpty ? cfg.endpoint : cfg.hermesBaseUrl
+        let model = cfg.hermesModel.isEmpty ? cfg.model : cfg.hermesModel
+        let toolsets = action.name == "hermes-ask" ? "" : "web"
+        // A session's toolset is FROZEN at creation and a resume cannot
+        // change it (tested: -t '' on a web-frozen session silently keeps
+        // web). So the two policies live in separate named sessions:
+        // "hermes" -> <session>   (-t web, info retrieval only)
+        // "hermes-ask" -> <session>-ask   (-t '', no tools at all)
         let session = action.name == "hermes-ask" ? cfg.hermesSession + "-ask" : cfg.hermesSession
         var args = ["chat", "--query-file", "-", "-Q", "--oneshot",
-                    "--continue", session]
+                    "--continue", session, "--create-if-missing",
+                    "--ignore-user-config",
+                    "--provider", "custom", "--base-url", base,
+                    "-m", model,
+                    "-t", toolsets,
+                    "--max-turns", String(cfg.hermesMaxTurns ?? 10)]
+        if let key = cfg.resolveKey(primary: true), !key.isEmpty {
+            // Passed to the child process only; never logged (resolveKey
+            // keeps it out of the config/log; we scrub it from stderr too).
+            args += ["--api-key", key]
+        }
         var r: (code: Int32, out: String, err: String)
         do {
             r = try await exec(path, args, stdinText: query, timeoutSec: cfg.hermesTimeoutSec)
-            if r.code != 0 && (r.err + r.out).contains("No session found matching") {
-                // First-ever use of the session name: create it, sending
-                // creation flags exactly once. needle-mac never changes
-                // Hermes: no -t / --max-turns unless the user explicitly
-                // configured them — the session inherits Hermes' own
-                // policy. (hermes-ask forces -t '': that reduces rights,
-                // it does not change Hermes.)
-                args.append("--create-if-missing")
-                if action.name == "hermes-ask" {
-                    args += ["-t", ""]
-                } else if let ts = cfg.hermesToolsets {
-                    args += ["-t", ts]
-                }
-                if let mt = cfg.hermesMaxTurns {
-                    args += ["--max-turns", String(mt)]
-                }
-                r = try await exec(path, args, stdinText: query, timeoutSec: cfg.hermesTimeoutSec)
-            }
         } catch let e as HermesTimeout {
             noteRunError(e.message)
             throw Engine.EngineError(message: e.message)
         }
         guard r.code == 0 else {
-            let why = Self.tail(r.err)
+            let why = Self.tail(r.err, scrubbing: [cfg.resolveKey(primary: true)])
             noteRunError(why.isEmpty ? "exit \(r.code)" : why)
             log("WARNING: hermes run failed (exit \(r.code))\(why.isEmpty ? "" : ": \(why)")")
             throw Engine.EngineError(message: "hermes failed (exit \(r.code))\(why.isEmpty ? "" : ": \(why)")")
@@ -648,11 +727,14 @@ final class HermesRunner {
     }
 
     // Last non-empty stderr lines, capped — for the log and menu row,
-    // never a paste of the whole transcript.
-    private static func tail(_ s: String, cap: Int = 240) -> String {
-        let lines = s.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        let t = lines.suffix(2).joined(separator: " | ")
-        return t.count > cap ? String(t.prefix(cap)) + "…" : t
+    // never a paste of the whole transcript. Any secret that appeared in
+    // the child's output is scrubbed before it can reach the log.
+    private static func tail(_ s: String, scrubbing: [String?] = [], cap: Int = 240) -> String {
+        var t = s
+        for case let k? in scrubbing where k.count >= 6 { t = t.replacingOccurrences(of: k, with: "<redacted>") }
+        let lines = t.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let out = lines.suffix(2).joined(separator: " | ")
+        return out.count > cap ? String(out.prefix(cap)) + "…" : out
     }
 }
 
@@ -1185,6 +1267,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hrow.isEnabled = false
         hrow.identifier = NSUserInterfaceItemIdentifier("hermes")
         menu.addItem(hrow)
+        let disc = NSMenuItem(title: "Discover Hermes models…", action: #selector(discoverHermesModels), keyEquivalent: "")
+        disc.target = self
+        disc.identifier = NSUserInterfaceItemIdentifier("hermes-discover")
+        menu.addItem(disc)
         menu.addItem(.separator())
         // login-item toggle (System Settings > General > Login Items)
         let login = NSMenuItem(title: "Launch at login", action: #selector(toggleLoginItem), keyEquivalent: "")
@@ -1286,6 +1372,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func openAXSettings() {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
+    // Model discovery: query the pinned hermes route's /models, then replace
+    // the "Discover Hermes models…" menu item with a submenu to pick from.
+    @objc func discoverHermesModels() {
+        guard let c = cfg, !busy else { return }
+        busy = true
+        startBusyAnimation(prefix: "⌕")
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let ids = try await HermesRunner.discoverModels(cfg: c)
+                await MainActor.run { self.showModelMenu(ids) }
+            } catch let e as Engine.EngineError {
+                self.finish(message: "model discovery failed — \(e.message)", code: 1)
+            } catch {
+                self.finish(message: "model discovery failed — \(error.localizedDescription)", code: 1)
+            }
+        }
+    }
+
+    func showModelMenu(_ ids: [String]) {
+        busy = false
+        stopBusyAnimation()
+        guard let item = statusItem.menu?.items.first(where: { $0.identifier?.rawValue == "hermes-discover" }) else {
+            finish(message: "discovered \(ids.count) hermes model(s)", code: 0)
+            return
+        }
+        let sub = NSMenu(title: "Hermes models")
+        sub.autoenablesItems = false
+        for id in ids {
+            let it = NSMenuItem(title: id, action: #selector(pickHermesModel(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = id
+            it.state = (id == cfg.hermesModel) ? .on : .off
+            sub.addItem(it)
+        }
+        item.submenu = sub
+        statusItem.button?.title = "✎"
+        finish(message: "discovered \(ids.count) hermes model(s) — open the menu to pick", code: 0)
+    }
+
+    @objc func pickHermesModel(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        do {
+            try Config.setValue(key: "hermes_model", value: id)
+            cfg.hermesModel = id
+            HermesRunner.shared.invalidateProbe()   // route changed: force a re-probe
+            finish(message: "hermes model set to \(id) — starts on the next NEW hermes_session", code: 0)
+        } catch {
+            finish(message: "could not update config — \(error.localizedDescription)", code: 1)
+        }
     }
 
     @objc func runFromMenu(_ sender: NSMenuItem) {
@@ -1543,6 +1681,29 @@ let args = CommandLine.arguments
 if args.count >= 2, args[1] == "-list" {
     for a in Actions.builtins { print("\(a.name) — \(a.description)") }
     exit(0)
+}
+if args.count >= 2, args[1] == "hermes-models" {
+    // discovery CLI: list the models the pinned hermes route serves
+    let (loaded, err) = Config.load()
+    guard let c = loaded else {
+        FileHandle.standardError.write("needle-mac: \((err ?? "config error"))\n".data(using: .utf8)!)
+        exit(64)
+    }
+    let sem = DispatchSemaphore(value: 0)
+    var code = 1
+    Task {
+        do {
+            for id in try await HermesRunner.discoverModels(cfg: c) { print(id) }
+            code = 0
+        } catch let e as Engine.EngineError {
+            FileHandle.standardError.write("needle-mac: \(e.message)\n".data(using: .utf8)!)
+        } catch {
+            FileHandle.standardError.write("needle-mac: \(error)\n".data(using: .utf8)!)
+        }
+        sem.signal()
+    }
+    sem.wait()
+    exit(Int32(code))
 }
 if args.count >= 2, args[1] != "daemon" {
     guard let a = Actions.get(args[1]) else {
