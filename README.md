@@ -99,6 +99,7 @@ ctrl+opt+i                 same palette, but the result goes only to the clipboa
 right-click selection      Services > needle: <action>   (result replaces the selection)
 needle-mac -list           list actions
 echo "text" | needle-mac proofread    one-shot: result on stdout + clipboard
+echo "text" | needle-mac hermes         one-shot through the Hermes agent (same session)
 ```
 
 Flags: `--no-paste` (result stays on the clipboard, nothing injected),
@@ -107,7 +108,58 @@ Flags: `--no-paste` (result stays on the clipboard, nothing injected),
 Actions: proofread, shorten, professional, casual, summarize, translate-en,
 translate-el, agentify, agentify+, publisher-opinion (original text followed
 by a book publisher's assessment of it), book-reviewer (original text followed
-by a literary reviewer's critique, aimed at novels and poetry).
+by a literary reviewer's critique, aimed at novels and poetry), hermes and
+hermes-ask (the Hermes agent engine — see below).
+
+## Take to Hermes (agent engine)
+
+The `hermes` and `hermes-ask` actions do not use the HTTP engine: they run
+the [Hermes Agent](https://hermes-agent.nousresearch.com) CLI as a
+subprocess **in lockdown mode**, against one persistent named session
+(`hermes_session`). Repeated invocations continue the same conversation
+from any app: ask "what did I send you before?" and it remembers.
+
+- **The child never loads your Hermes config.** Every call runs with
+  `--ignore-user-config`: no MCP servers, no plugins, no hosted-provider
+  fallbacks exist in the process — whatever your `config.yaml` grants your
+  interactive Hermes sessions does not apply here. Routing is explicit:
+  `--provider custom` + `hermes_base_url` (default: your `endpoint`) +
+  `hermes_model` (default: your `model`) + the API key resolved by the
+  existing `key_file` mechanism. Discover what a route serves with the
+  menu's **Discover Hermes models…** item or `needle-mac hermes-models`;
+  picking one writes `hermes_model` into your needle-mac config.
+- **Hard toolset guarantee.** Selected text is untrusted input — anything
+  you highlight, including hostile web pages — so the tool surface is
+  fixed by needle-mac on every call, never by the text: `hermes` gets
+  ONLY `web_search`/`web_extract` (information retrieval; user-approved);
+  `hermes-ask` gets nothing at all. No shell, no files, no subagent
+  delegation, no MCP (the deferred `tool_search`/`tool_call` machinery is
+  absent from these sessions — verified by escalation tests). The only
+  cost surface is one chat call to your own endpoint per action plus, for
+  `hermes`, bounded web lookups (`hermes_max_turns`, default 10). Not
+  configurable beyond that by design.
+- The toolset policy is frozen at session creation and a resume cannot
+  change it (verified), so each policy owns its own session: `hermes`
+  uses `<hermes_session>` (web lookup) and `hermes-ask` uses
+  `<hermes_session>-ask` (no tools). Repeated invocations of the same
+  action continue their conversation. If you change
+  `hermes_base_url`/`hermes_model`, bump `hermes_session` or delete the
+  old sessions (`hermes sessions delete <id>`); the next action
+  recreates them.
+- **Availability is never silent.** `hermes --version` is probed at
+  startup and re-probed at most once per minute (the menu shows a live
+  `Hermes: available / NOT FOUND / error — …` row, refreshed on open).
+  Running a hermes action while Hermes is unreachable warns visibly (⚠
+  on the icon + notification, exit 1 in one-shot mode). It does NOT fall
+  back to the HTTP engine — unless you opt in with
+  `hermes_fallback = engine`.
+- The selection is piped through `--query-file -`, which is verbatim:
+  quotes, `$(...)`, and backticks in selected text are never interpreted
+  by any shell.
+- Failure details (exit code, last stderr lines, keys scrubbed) and the
+  hermes `session_id` go to `~/Library/Logs/needle-mac.log`, never into
+  the UI; the API key is passed to the child process only and never
+  logged.
 
 ## Config
 
@@ -116,7 +168,9 @@ by a literary reviewer's critique, aimed at novels and poetry).
 An unknown key is a startup error (typos in `key_file` are worse than failing
 loud). Keys: `endpoint`, `model`, `key_file`, `key_var`, `fallback_endpoint`,
 `fallback_model`, `fallback_key_file`, `fallback_key_var`, `hotkey`,
-`copy_combo`, `paste_combo`, `max_tokens`, `timeout`.
+`copy_combo`, `paste_combo`, `max_tokens`, `timeout`, `hermes_command`,
+`hermes_session`, `hermes_timeout`, `hermes_base_url`, `hermes_model`,
+`hermes_max_turns`, `hermes_fallback`.
 
 API keys come from `NEEDLE_API_KEY` / `NEEDLE_FALLBACK_API_KEY` in the
 environment, or from an env-format file named by `key_file` /
